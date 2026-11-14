@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MO Hunt Map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Hunt Map">
+<meta name="theme-color" content="#14190f">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{
+    --bg:#14190f; --panel:#1d2417; --line:#35402a; --ink:#eef0e6; --dim:#a4ad94;
+    --blaze:#ff7a1a; --ok:#8bd450; --warn:#ffcf4a; --bad:#ff5d4d;
+    --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%; margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow:hidden}
+  #map{position:absolute; inset:0; background:#0c0f09}
+  .leaflet-control-attribution{font-size:9px; background:rgba(20,25,15,.7)!important; color:#aab!important}
+  .leaflet-control-attribution a{color:#cdd!important}
+
+  /* top status chip */
+  #status{position:absolute; top:calc(var(--sat) + 10px); left:10px; right:10px; z-index:1000;
+    display:flex; gap:8px; align-items:center; pointer-events:none}
+  .chip{pointer-events:auto; background:rgba(20,25,15,.88); border:1px solid var(--line); border-radius:999px;
+    padding:7px 12px; font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .chip b{font-weight:600}
+  .dot{display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--dim); margin-right:6px; vertical-align:middle}
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+
+  /* bottom bar */
+  #bar{position:absolute; left:0; right:0; bottom:0; z-index:1000; display:flex; gap:8px;
+    padding:10px 10px calc(var(--sab) + 10px); background:linear-gradient(transparent, rgba(12,15,9,.85) 40%)}
+  #bar button{flex:1; min-height:54px; border-radius:14px; border:1px solid var(--line); background:var(--panel);
+    color:var(--ink); font:600 13px/1.1 inherit; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px}
+  #bar button svg{width:22px; height:22px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round}
+  #bar button.on{border-color:var(--blaze); color:var(--blaze)}
+  #bar button:active{transform:scale(.97)}
+
+  /* sheets */
+  .sheet{position:absolute; left:0; right:0; bottom:0; z-index:1100; max-height:72%; overflow:auto; -webkit-overflow-scrolling:touch;
+    background:var(--panel); border-top:1px solid var(--line); border-radius:18px 18px 0 0;
+    padding:6px 16px calc(var(--sab) + 18px); transform:translateY(105%); transition:transform .22s ease}
+  .sheet.open{transform:none}
+  .sheet .grab{width:44px; height:5px; border-radius:3px; background:var(--line); margin:6px auto 10px}
+  .sheet h2{font-size:17px; margin:0 0 4px; display:flex; justify-content:space-between; align-items:center}
+  .sheet h3{font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); margin:18px 0 6px}
+  .x{background:none; border:0; color:var(--dim); font-size:26px; line-height:1; padding:4px 8px}
+  .row{display:flex; align-items:center; gap:12px; padding:11px 0; border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .row .t{flex:1; min-width:0}
+  .row .t small{display:block; color:var(--dim); font-size:12px}
+  .sw{width:14px; height:14px; border-radius:3px; flex:none; border:2px solid}
+  input[type=checkbox],input[type=radio]{width:22px; height:22px; accent-color:var(--blaze); flex:none}
+  input[type=text],input[type=url]{width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--line);
+    background:#11150d; color:var(--ink); font:inherit; margin:4px 0}
+  .btn{display:inline-block; padding:11px 16px; border-radius:10px; border:1px solid var(--line); background:#2a3420;
+    color:var(--ink); font:600 14px inherit}
+  .btn.go{background:var(--blaze); border-color:var(--blaze); color:#1a0e00}
+  .btn.sm{padding:6px 10px; font-size:12px}
+  .note{color:var(--dim); font-size:12.5px; margin:6px 0}
+  .card{border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:10px 0; background:#171d12}
+  .card h4{margin:0 0 6px; font-size:14px; color:var(--blaze)}
+  .kv{display:grid; grid-template-columns:38% 1fr; gap:3px 10px; font-size:13px}
+  .kv span:nth-child(odd){color:var(--dim); overflow-wrap:anywhere}
+  .kv span:nth-child(even){overflow-wrap:anywhere}
+  .big{font-size:15px; font-weight:600; margin-bottom:6px}
+
+  #toast{position:absolute; left:50%; bottom:calc(var(--sab) + 84px); transform:translateX(-50%); z-index:1200;
+    background:rgba(20,25,15,.95); border:1px solid var(--line); border-radius:10px; padding:9px 14px; font-size:13px;
+    max-width:88%; text-align:center; opacity:0; transition:opacity .2s; pointer-events:none}
+  #toast.show{opacity:1}
+
+  #intro{position:absolute; inset:0; z-index:2000; background:rgba(12,15,9,.94); display:flex; align-items:center; justify-content:center; padding:22px}
+  #intro div{max-width:420px}
+  #intro h1{font-size:22px; margin:0 0 10px} #intro h1 span{color:var(--blaze)}
+  #intro p{color:var(--dim); margin:8px 0}
+  #intro strong{color:var(--ink)}
+  .me{width:18px; height:18px; border-radius:50%; background:#2f8cff; border:3px solid #fff; box-shadow:0 0 0 2px rgba(0,0,0,.4)}
+  .wp{width:26px; height:26px; border-radius:50% 50% 50% 0; background:var(--blaze); border:2px solid #fff; transform:rotate(-45deg); box-shadow:0 1px 4px rgba(0,0,0,.6)}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="status">
+  <div class="chip" id="gpsChip"><span class="dot" id="gpsDot"></span><span id="gpsTxt">GPS off — tap Locate</span></div>
+</div>
+
+<div id="bar">
+  <button id="bLocate"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>Locate</button>
+  <button id="bHere"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.800-7 11-7 11z"/><path d="M12 8v3M12 14h.01"/></svg>Whose land?</button>
+  <button id="bMark"><svg viewBox="0 0 24 24"><path d="M5 21V4h11l-2 4 2 4H5"/></svg>Mark</button>
+  <button id="bLayers"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5"/></svg>Layers</button>
+</div>
+
+<div class="sheet" id="layersSheet">
+  <div class="grab"></div>
+  <h2>Layers <button class="x" data-close>&times;</button></h2>
+  <h3>Base map</h3><div id="baseList"></div>
+  <h3>Land &amp; boundaries</h3><div id="ovList"></div>
+  <h3>County parcel lines</h3>
+  <p class="note">Missouri has no free statewide parcel map — each county publishes its own. Paste your county's ArcGIS layer address (ends in <b>/MapServer/3</b> or <b>/FeatureServer/0</b>) to add private property lines and owner names.</p>
+  <input type="text" id="cName" placeholder="Name (e.g. Texas County parcels)" autocomplete="off">
+  <input type="url" id="cUrl" placeholder="https://…/arcgis/rest/services/…/MapServer/0" autocomplete="off" autocapitalize="off">
+  <button class="btn go" id="cAdd">Add parcel layer</button>
+  <h3>Waypoints</h3><div id="wpList"></div>
+  <p class="note">Boundaries shown are from public GIS data and can be off by many yards. They are a guide, not a survey. Get permission before crossing onto private land.</p>
+</div>
+
+<div class="sheet" id="infoSheet">
+  <div class="grab"></div>
+  <h2><span id="infoTitle">Land here</span> <button class="x" data-close>&times;</button></h2>
+  <div id="infoBody"></div>
+</div>
+
+<div class="sheet" id="markSheet">
+  <div class="grab"></div>
+  <h2>New waypoint <button class="x" data-close>&times;</button></h2>
+  <p class="note" id="markWhere"></p>
+  <input type="text" id="markName" placeholder="Name (stand, gate, truck…)" autocomplete="off">
+  <button class="btn go" id="markSave">Save waypoint</button>
+</div>
+
+<div id="toast"></div>
+
+<div id="intro">
+  <div>
+    <h1>MO <span>Hunt Map</span></h1>
+    <p><strong>Shows your GPS position over public-land and property boundaries</strong> from free government map data (MDC, U.S. Forest Service, USGS, Missouri MSDIS).</p>
+    <p>Tap anywhere on the map, or press <strong>Whose land?</strong>, to see who owns or manages that spot.</p>
+    <p><strong>Lines are approximate.</strong> GPS and public map data can each be off by 30 ft or more. This is not a legal survey — when in doubt, stay back from the line and ask the landowner.</p>
+    <p>Needs cell signal to load maps.</p>
+    <button class="btn go" id="introGo">Got it</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/esri-leaflet@3.0.12/dist/esri-leaflet.js"></script>
+<script>
+(function(){
+'use strict';
+
+/* ---------- small helpers ---------- */
+var $ = function(id){ return document.getElementById(id); };
+var store = {
+  get: function(k, d){ try{ var v = localStorage.getItem('mohunt.'+k); return v==null ? d : JSON.parse(v); }catch(e){ return d; } },
+  set: function(k, v){ try{ localStorage.setItem('mohunt.'+k, JSON.stringify(v)); }catch(e){} }
+};
+function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+var toastT;
+function toast(msg, ms){ var t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(function(){ t.classList.remove('show'); }, ms||3200); }
+function ft(m){ return Math.round(m*3.28084); }
+function distTxt(m){ var f=m*3.28084; return f<1000 ? Math.round(f)+' ft' : (f/5280).toFixed(2)+' mi'; }
+
+if (!window.L || !L.esri){
+  document.body.insertAdjacentHTML('beforeend','<div id="intro" style="z-index:3000"><div><h1>Map library did not load</h1><p>Check your signal and reload the page.</p></div></div>');
+  return;
+}
+
+/* ---------- map ---------- */
+var view = store.get('view', {c:[38.35,-92.45], z:7});
+var map = L.map('map', {zoomControl:false, center:view.c, zoom:view.z, maxZoom:20, tap:false});
+map.attributionControl.setPrefix('');
+L.control.scale({imperial:true, metric:false, position:'topright'}).addTo(map);
+map.createPane('ov');     map.getPane('ov').style.zIndex = 350;
+map.createPane('parcel'); map.getPane('parcel').style.zIndex = 360;
+map.createPane('hi');     map.getPane('hi').style.zIndex = 450;
+map.on('moveend', function(){ var c=map.getCenter(); store.set('view', {c:[c.lat,c.lng], z:map.getZoom()}); });
+
+/* ---------- base maps (all free, public) ---------- */
+var USGS = 'https://basemap.nationalmap.gov/arcgis/rest/services/';
+var bases = {
+  hybrid: {name:'Aerial + topo lines', sub:'USGS', make:function(){ return L.tileLayer(USGS+'USGSImageryTopo/MapServer/tile/{z}/{y}/{x}', {maxNativeZoom:16, maxZoom:20, attribution:'USGS The National Map'}); }},
+  aerial: {name:'Aerial photo', sub:'USGS', make:function(){ return L.tileLayer(USGS+'USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', {maxNativeZoom:16, maxZoom:20, attribution:'USGS The National Map'}); }},
+  mo6:    {name:'Missouri 6-inch aerial (2023–24)', sub:'MSDIS — sharpest, loads slower', make:function(){
+            return L.esri.imageMapLayer({url:'https://stateimagery.msdis.missouri.edu/arcgis/rest/services/Missouri_6inch_Statewide_2023_2024_Dynamic/ImageServer', f:'image', format:'jpg', attribution:'Missouri MSDIS'}); }},
+  topo:   {name:'Topo map', sub:'USGS', make:function(){ return L.tileLayer(USGS+'USGSTopo/MapServer/tile/{z}/{y}/{x}', {maxNativeZoom:16, maxZoom:20, attribution:'USGS The National Map'}); }}
+};
+var baseKey = store.get('base', 'hybrid'); if(!bases[baseKey]) baseKey='hybrid';
+var baseLayer = null;
+function setBase(k){
+  if (baseLayer) map.removeLayer(baseLayer);
+  baseKey = k; store.set('base', k);
+  baseLayer = bases[k].make().addTo(map);
+  if (baseLayer.bringToBack) baseLayer.bringToBack();
+}
+
+/* ---------- overlays ---------- */
+// kind 'dyn' = ArcGIS MapServer drawn by the agency's server; 'feat' = FeatureServer drawn on the phone.
+var builtin = [
+  {id:'mdc',  name:'MDC conservation areas', sub:'Missouri Dept. of Conservation — public', color:'#8bd450', kind:'dyn',
+   url:'https://gisblue.mdc.mo.gov/arcgis/rest/services/Boundaries/MDC_Administrative_Boundaries/MapServer', layers:[0], on:true},
+  {id:'mrap', name:'MRAP walk-in lands', sub:'Private land open to public through MDC — check each area\'s rules', color:'#4ad1c7', kind:'dyn',
+   url:'https://gisblue.mdc.mo.gov/arcgis/rest/services/Boundaries/MDC_Administrative_Boundaries/MapServer', layers:[2], on:true},
+  {id:'usfs', name:'Mark Twain National Forest ownership', sub:'U.S. Forest Service — shows private inholdings', color:'#ffcf4a', kind:'dyn',
+   url:'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_BasicOwnership_02/MapServer', layers:[0], on:true},
+  {id:'padus', name:'Other public land', sub:'USGS PAD-US: Corps of Engineers (Mark Twain Lake), refuges, state parks', color:'#c58bff', kind:'feat',
+   url:'https://services.arcgis.com/v01gqwM5QqNysAAi/arcgis/rest/services/Fee_Manager/FeatureServer/0', minZoom:10, on:true},
+  {id:'franklin', name:'Franklin County parcels', sub:'Franklin County, MO — private property lines and owners; zoom in close', color:'#ff7a1a', kind:'dyn', custom:false, parcel:true,
+   url:'https://www.franklinmo.net/server/rest/services/MapLayers/Parcel_Data_New/MapServer', layers:[0], on:true, opacity:.9},
+  {id:'plss', name:'Section lines (PLSS)', sub:'MSDIS — township/range/section grid; rural property lines often follow these', color:'#ffffff', kind:'dyn',
+   url:'https://msdisweb.missouri.edu/arcgis/rest/services/Administrative_Boundaries/MO_Public_Land_Survey_System/MapServer', layers:[0], on:false, opacity:.75}
+];
+var custom = store.get('custom', []);      // [{id,name,url,kind,layers}]
+var onState = store.get('on', null) || {}; // id -> bool
+var live = {};                              // id -> leaflet layer
+
+function allDefs(){ return builtin.concat(custom.map(function(c){
+  return {id:c.id, name:c.name, sub:c.url.replace(/^https?:\/\//,''), color:'#ff7a1a', kind:c.kind, url:c.url, layers:c.layers, minZoom:13, custom:true, on:true};
+})); }
+function isOn(d){ return (d.id in onState) ? onState[d.id] : !!d.on; }
+
+function makeLayer(d){
+  var lyr;
+  if (d.kind === 'dyn'){
+    var o = {url:d.url, f:'image', format:'png32', transparent:true, opacity:d.opacity||0.85, pane:(d.custom||d.parcel)?'parcel':'ov'};
+    if (d.layers && d.layers.length) o.layers = d.layers;
+    lyr = L.esri.dynamicMapLayer(o);
+  } else {
+    lyr = L.esri.featureLayer({url:d.url, minZoom:d.minZoom||10, simplifyFactor:0.35, precision:6, pane:(d.custom||d.parcel)?'parcel':'ov',
+      style:function(){ return {color:d.color, weight:d.custom?1.5:2, fillColor:d.color, fillOpacity:d.custom?0:0.12, interactive:false}; }});
+  }
+  var warned = false;
+  var warn = function(){ if(!warned){ warned=true; toast('"'+d.name+'" is not responding right now.'); } };
+  lyr.on('requesterror', warn); lyr.on('error', warn);
+  return lyr;
+}
+function setOverlay(d, on){
+  onState[d.id] = on; store.set('on', onState);
+  if (on && !live[d.id]){ live[d.id] = makeLayer(d).addTo(map); if (d.minZoom && map.getZoom() < d.minZoom) toast('Zoom in to see "'+d.name+'".'); }
+  if (!on && live[d.id]){ map.removeLayer(live[d.id]); delete live[d.id]; }
+}
+
+/* ---------- layer sheet UI ---------- */
+function renderLayers(){
+  $('baseList').innerHTML = Object.keys(bases).map(function(k){
+    return '<label class="row"><input type="radio" name="base" value="'+k+'"'+(k===baseKey?' checked':'')+'><span class="t">'+esc(bases[k].name)+'<small>'+esc(bases[k].sub)+'</small></span></label>';
+  }).join('');
+  $('ovList').innerHTML = allDefs().map(function(d){
+    return '<label class="row"><input type="checkbox" data-ov="'+d.id+'"'+(isOn(d)?' checked':'')+'><span class="sw" style="border-color:'+d.color+'"></span><span class="t">'+esc(d.name)+'<small>'+esc(d.sub)+'</small></span>'+
+      (d.custom?'<button class="btn sm" data-del="'+d.id+'">Remove</button>':'')+'</label>';
+  }).join('');
+  renderWps();
+}
+$('baseList').addEventListener('change', function(e){ if(e.target.name==='base') setBase(e.target.value); });
+$('ovList').addEventListener('change', function(e){
+  var id = e.target.getAttribute('data-ov'); if(!id) return;
+  var d = allDefs().filter(function(x){ return x.id===id; })[0]; if(d) setOverlay(d, e.target.checked);
+});
+$('ovList').addEventListener('click', function(e){
+  var id = e.target.getAttribute('data-del'); if(!id) return; e.preventDefault();
+  if (live[id]){ map.removeLayer(live[id]); delete live[id]; }
+  custom = custom.filter(function(c){ return c.id!==id; }); store.set('custom', custom);
+  delete onState[id]; store.set('on', onState); renderLayers();
+});
+$('cAdd').addEventListener('click', function(){
+  var raw = $('cUrl').value.trim().split('?')[0].replace(/\/+$/,'');
+  var m = raw.match(/^(https:\/\/.+\/(MapServer|FeatureServer))(?:\/(\d+))?$/i);
+  if (!m){ toast('That address should start with https:// and end in /MapServer/# or /FeatureServer/#', 5000); return; }
+  var isFeat = /featureserver/i.test(m[2]);
+  var n = m[3]!=null ? parseInt(m[3],10) : null;
+  var c = {id:'c'+Date.now(), name:$('cName').value.trim()||'County parcels', kind:isFeat?'feat':'dyn',
+           url:isFeat ? m[1]+'/'+(n==null?0:n) : m[1], layers:(!isFeat && n!=null)?[n]:null};
+  custom.push(c); store.set('custom', custom);
+  $('cUrl').value=''; $('cName').value='';
+  renderLayers();
+  setOverlay(allDefs().filter(function(x){ return x.id===c.id; })[0], true);
+  toast('Added. Zoom in close to see parcel lines.');
+});
+
+/* ---------- sheets ---------- */
+function openSheet(id){ ['layersSheet','infoSheet','markSheet'].forEach(function(s){ $(s).classList.toggle('open', s===id); }); }
+function closeSheets(){ openSheet(null); }
+document.addEventListener('click', function(e){ if(e.target.hasAttribute && e.target.hasAttribute('data-close')) closeSheets(); });
+$('bLayers').addEventListener('click', function(){ renderLayers(); openSheet('layersSheet'); });
+
+/* ---------- GPS ---------- */
+var me = null, meAcc = null, lastFix = null, watchId = null, follow = false;
+function setGps(cls, txt){ $('gpsDot').className='dot '+cls; $('gpsTxt').innerHTML=txt; }
+function onFix(p){
+  var ll = L.latLng(p.coords.latitude, p.coords.longitude), acc = p.coords.accuracy||0;
+  lastFix = {ll:ll, acc:acc};
+  if (!me){
+    meAcc = L.circle(ll, {radius:acc, color:'#2f8cff', weight:1, fillOpacity:.12, interactive:false}).addTo(map);
+    me = L.marker(ll, {icon:L.divIcon({className:'', html:'<div class="me"></div>', iconSize:[18,18], iconAnchor:[9,9]}), interactive:false, zIndexOffset:1000}).addTo(map);
+    map.setView(ll, Math.max(map.getZoom(), 16));
+  } else { me.setLatLng(ll); meAcc.setLatLng(ll).setRadius(acc); if (follow) map.panTo(ll); }
+  var f = ft(acc), cls = f<=35 ? 'ok' : (f<=100 ? 'warn' : 'bad');
+  setGps(cls, '<b>±'+f+' ft</b> &nbsp;'+ll.lat.toFixed(5)+', '+ll.lng.toFixed(5));
+}
+function onGpsErr(e){
+  var msg = e.code===1 ? 'Location blocked — allow it in browser settings' : 'No GPS fix yet — get open sky';
+  if (location.protocol!=='https:' && location.hostname!=='localhost') msg = 'GPS needs an https:// address';
+  setGps('bad', msg);
+}
+function startGps(){
+  if (!navigator.geolocation){ setGps('bad','This browser has no GPS access'); return; }
+  if (watchId==null){
+    setGps('warn','Finding you…');
+    watchId = navigator.geolocation.watchPosition(onFix, onGpsErr, {enableHighAccuracy:true, maximumAge:2000, timeout:20000});
+  }
+}
+$('bLocate').addEventListener('click', function(){
+  startGps(); follow = true; $('bLocate').classList.add('on');
+  if (lastFix) map.setView(lastFix.ll, Math.max(map.getZoom(), 16));
+});
+map.on('dragstart', function(){ follow=false; $('bLocate').classList.remove('on'); });
+
+/* ---------- "whose land is this?" ---------- */
+var hi = L.geoJSON(null, {pane:'hi', style:{color:'#ffe600', weight:3, fillOpacity:.08}, interactive:false}).addTo(map);
+var SKIP = /^(objectid|fid|shape|shape[._]|globalid|st_area|st_length|gis_acres$|created_|last_edited)/i;
+function propsHtml(p){
+  var rows = Object.keys(p||{}).filter(function(k){
+    var v = p[k]; return !SKIP.test(k) && v!=null && String(v).trim()!=='' && String(v).trim().toLowerCase()!=='null';
+  }).map(function(k){
+    var v = String(p[k]);
+    var cell = /^https?:\/\//i.test(v) ? '<a href="'+esc(v)+'" target="_blank" rel="noopener" style="color:#8bd450">Open link</a>' : esc(v);
+    return '<span>'+esc(k.replace(/_/g,' '))+'</span><span>'+cell+'</span>';
+  });
+  return rows.length ? '<div class="kv">'+rows.join('')+'</div>' : '<div class="note">No details published for this area.</div>';
+}
+function inspect(ll, title){
+  var defs = allDefs().filter(function(d){ return live[d.id]; });
+  hi.clearLayers();
+  $('infoTitle').textContent = title;
+  $('infoBody').innerHTML = '<p class="note">Checking '+defs.length+' layer'+(defs.length===1?'':'s')+'…</p>';
+  openSheet('infoSheet');
+  var pending = defs.length, cards = [], fails = [];
+  if (!pending){ $('infoBody').innerHTML = '<p class="note">Turn on some layers first.</p>'; return; }
+  function done(){
+    if (--pending > 0) return;
+    var h = '<p class="note">'+ll.lat.toFixed(5)+', '+ll.lng.toFixed(5)+'</p>';
+    if (cards.length) h += cards.join('');
+    else h += '<div class="card"><div class="big">No public land found at this spot.</div><div class="note">Treat it as <b style="color:#ffcf4a">private — permission required</b> unless you know otherwise. Add your county parcel layer (Layers) to see the owner.</div></div>';
+    if (fails.length) h += '<p class="note">Could not check: '+esc(fails.join(', '))+'.</p>';
+    $('infoBody').innerHTML = h;
+  }
+  defs.forEach(function(d){
+    var cb = function(err, fc){
+      if (err){ fails.push(d.name); return done(); }
+      var feats = (fc && fc.features) || [];
+      feats.slice(0,4).forEach(function(f){
+        if (f.geometry && /Polygon|Line/.test(f.geometry.type)){ try{ hi.addData(f); }catch(e){} }
+        cards.push('<div class="card"><h4>'+esc(d.name)+'</h4>'+propsHtml(f.properties)+'</div>');
+      });
+      done();
+    };
+    try{
+      if (d.kind === 'dyn'){
+        var q = live[d.id].identify().on(map).at(ll).tolerance(4);
+        if (d.layers && d.layers.length) q.layers('all:'+d.layers.join(','));
+        q.run(cb);
+      } else {
+        live[d.id].query().intersects(ll).run(cb);
+      }
+    }catch(e){ fails.push(d.name); done(); }
+  });
+}
+map.on('click', function(e){ inspect(e.latlng, 'Land at tapped spot'); });
+$('bHere').addEventListener('click', function(){
+  if (lastFix){ inspect(lastFix.ll, 'Land where you stand (±'+ft(lastFix.acc)+' ft)'); }
+  else { startGps(); toast('Waiting for GPS… or tap any spot on the map.'); }
+});
+
+/* ---------- waypoints ---------- */
+var wps = store.get('wps', []);   // [{id,name,lat,lng}]
+var wpLayer = L.layerGroup().addTo(map), markAt = null;
+function drawWps(){
+  wpLayer.clearLayers();
+  wps.forEach(function(w){
+    L.marker([w.lat,w.lng], {icon:L.divIcon({className:'', html:'<div class="wp"></div>', iconSize:[26,26], iconAnchor:[13,26]})})
+      .bindTooltip(w.name, {permanent:true, direction:'bottom', offset:[0,2], opacity:.9})
+      .on('click', function(ev){
+        L.DomEvent.stopPropagation(ev);
+        var d = lastFix ? ' — '+distTxt(lastFix.ll.distanceTo([w.lat,w.lng]))+' from you' : '';
+        toast(w.name+d, 4000);
+      }).addTo(wpLayer);
+  });
+}
+function renderWps(){
+  $('wpList').innerHTML = wps.length ? wps.map(function(w){
+    var d = lastFix ? distTxt(lastFix.ll.distanceTo([w.lat,w.lng]))+' away' : w.lat.toFixed(5)+', '+w.lng.toFixed(5);
+    return '<div class="row"><span class="t" data-go="'+w.id+'">'+esc(w.name)+'<small>'+d+'</small></span><button class="btn sm" data-wdel="'+w.id+'">Delete</button></div>';
+  }).join('') : '<p class="note">None yet. Use Mark to save a stand, gate or parking spot.</p>';
+}
+$('wpList').addEventListener('click', function(e){
+  var del = e.target.getAttribute('data-wdel'), go = e.target.closest ? e.target.closest('[data-go]') : null;
+  if (del){ wps = wps.filter(function(w){ return String(w.id)!==del; }); store.set('wps', wps); drawWps(); renderWps(); }
+  else if (go){ var w = wps.filter(function(x){ return String(x.id)===go.getAttribute('data-go'); })[0];
+    if (w){ closeSheets(); follow=false; $('bLocate').classList.remove('on'); map.setView([w.lat,w.lng], Math.max(map.getZoom(),16)); } }
+});
+$('bMark').addEventListener('click', function(){
+  markAt = lastFix ? lastFix.ll : map.getCenter();
+  $('markWhere').textContent = lastFix ? 'Saving your GPS position (±'+ft(lastFix.acc)+' ft).' : 'No GPS fix — saving the center of the map.';
+  $('markName').value = ''; openSheet('markSheet');
+});
+$('markSave').addEventListener('click', function(){
+  if (!markAt) return;
+  wps.push({id:Date.now(), name:$('markName').value.trim()||('Waypoint '+(wps.length+1)), lat:markAt.lat, lng:markAt.lng});
+  store.set('wps', wps); drawWps(); closeSheets(); toast('Waypoint saved.');
+});
+
+/* ---------- start ---------- */
+setBase(baseKey);
+allDefs().forEach(function(d){ if (isOn(d)) setOverlay(d, true); });
+drawWps();
+if (store.get('seenIntro', false)) $('intro').style.display='none';
+$('introGo').addEventListener('click', function(){ $('intro').style.display='none'; store.set('seenIntro', true); startGps(); });
+})();
+</script>
+</body>
+</html>
