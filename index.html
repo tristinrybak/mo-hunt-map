@@ -312,53 +312,104 @@ $('bLocate').addEventListener('click', function(){
 map.on('dragstart', function(){ follow=false; $('bLocate').classList.remove('on'); });
 
 /* ---------- "whose land is this?" ---------- */
-var hi = L.geoJSON(null, {pane:'hi', style:{color:'#ffe600', weight:3, fillOpacity:.08}, interactive:false}).addTo(map);
+var hi = L.layerGroup().addTo(map);
 var SKIP = /^(objectid|fid|shape|shape[._]|globalid|st_area|st_length|gis_acres$|created_|last_edited)/i;
-function propsHtml(p){
+function propsHtml(p, alias){
   var rows = Object.keys(p||{}).filter(function(k){
     var v = p[k]; return !SKIP.test(k) && v!=null && String(v).trim()!=='' && String(v).trim().toLowerCase()!=='null';
   }).map(function(k){
-    var v = String(p[k]);
+    var v = String(p[k]), label = (alias && alias[k]) || k;
     var cell = /^https?:\/\//i.test(v) ? '<a href="'+esc(v)+'" target="_blank" rel="noopener" style="color:#8bd450">Open link</a>' : esc(v);
-    return '<span>'+esc(k.replace(/_/g,' '))+'</span><span>'+cell+'</span>';
+    return '<span>'+esc(label.replace(/_/g,' '))+'</span><span>'+cell+'</span>';
   });
   return rows.length ? '<div class="kv">'+rows.join('')+'</div>' : '<div class="note">No details published for this area.</div>';
 }
+// Ask an ArcGIS server a question. Tries a normal request first, then a script-tag
+// request for servers that don't allow cross-site requests. Always answers within ~12 s.
+var jsonpN = 0;
+function arc(url, params, cb){
+  var qs = Object.keys(params).map(function(k){ return encodeURIComponent(k)+'='+encodeURIComponent(params[k]); }).join('&');
+  var finished = false;
+  function finish(err, data){ if(finished) return; finished = true; cb(err, data); }
+  function viaScript(){
+    var name = '__mohunt_cb'+(++jsonpN), s = document.createElement('script');
+    var t = setTimeout(function(){ cleanup(); finish(new Error('timeout')); }, 12000);
+    function cleanup(){ clearTimeout(t); try{ delete window[name]; }catch(e){ window[name]=undefined; } if(s.parentNode) s.parentNode.removeChild(s); }
+    window[name] = function(data){ cleanup(); if(data && data.error) finish(new Error(data.error.message||'server error')); else finish(null, data); };
+    s.onerror = function(){ cleanup(); finish(new Error('unreachable')); };
+    s.src = url+'?'+qs+'&callback='+name;
+    document.head.appendChild(s);
+  }
+  if (!window.fetch){ viaScript(); return; }
+  var ctl = window.AbortController ? new AbortController() : null;
+  var timer = setTimeout(function(){ if(ctl) ctl.abort(); }, 12000);
+  fetch(url+'?'+qs, ctl ? {signal:ctl.signal} : {}).then(function(r){ return r.json(); }).then(function(data){
+    clearTimeout(timer);
+    if (data && data.error) finish(new Error(data.error.message||'server error')); else finish(null, data);
+  }).catch(function(e){
+    clearTimeout(timer);
+    if (e && e.name==='AbortError') finish(new Error('timeout')); else viaScript();
+  });
+}
+function drawGeom(g){
+  if (!g) return;
+  var parts = g.rings || g.paths; if (!parts) return;
+  var lls = parts.map(function(r){ return r.map(function(p){ return [p[1], p[0]]; }); });
+  try{
+    (g.rings ? L.polygon(lls, {color:'#ffe600', weight:3, fillOpacity:.08, pane:'hi', interactive:false})
+             : L.polyline(lls, {color:'#ffe600', weight:3, pane:'hi', interactive:false})).addTo(hi);
+  }catch(e){}
+}
+var inspectRun = 0;
 function inspect(ll, title){
+  var run = ++inspectRun;
   var defs = allDefs().filter(function(d){ return live[d.id]; });
   hi.clearLayers();
   $('infoTitle').textContent = title;
-  $('infoBody').innerHTML = '<p class="note">Checking '+defs.length+' layer'+(defs.length===1?'':'s')+'…</p>';
   openSheet('infoSheet');
-  var pending = defs.length, cards = [], fails = [];
-  if (!pending){ $('infoBody').innerHTML = '<p class="note">Turn on some layers first.</p>'; return; }
-  function done(){
-    if (--pending > 0) return;
-    var h = '<p class="note">'+ll.lat.toFixed(5)+', '+ll.lng.toFixed(5)+'</p>';
-    if (cards.length) h += cards.join('');
-    else h += '<div class="card"><div class="big">No public land found at this spot.</div><div class="note">Treat it as <b style="color:#ffcf4a">private — permission required</b> unless you know otherwise. Add your county parcel layer (Layers) to see the owner.</div></div>';
-    if (fails.length) h += '<p class="note">Could not check: '+esc(fails.join(', '))+'.</p>';
-    $('infoBody').innerHTML = h;
+  if (!defs.length){ $('infoBody').innerHTML = '<p class="note">Turn on some layers first (Layers button).</p>'; return; }
+  $('infoBody').innerHTML = '<p class="note">'+ll.lat.toFixed(5)+', '+ll.lng.toFixed(5)+'</p><div id="infoHits"></div><div id="infoNone"></div><p class="note" id="infoStat"></p>';
+  var pending = defs.length, hits = 0, empty = [], fails = [];
+  function status(){
+    if (run !== inspectRun) return;
+    var s = [];
+    if (pending) s.push('Checking '+pending+' more layer'+(pending===1?'':'s')+'…');
+    if (empty.length) s.push('Nothing at this spot in: '+empty.join(', ')+'.');
+    if (fails.length) s.push('Could not reach: '+fails.join(', ')+'.');
+    $('infoStat').textContent = s.join(' ');
+    if (!pending && !hits){
+      $('infoNone').innerHTML = '<div class="card"><div class="big">No match found at this spot.</div><div class="note">'+
+        (fails.length ? 'Some layers did not answer, so this is incomplete. ' : '')+
+        'Treat it as <b style="color:#ffcf4a">private — permission required</b> unless you know otherwise.</div></div>';
+    }
   }
+  status();
+  var pt = ll.lng+','+ll.lat;
   defs.forEach(function(d){
-    var cb = function(err, fc){
-      if (err){ fails.push(d.name); return done(); }
-      var feats = (fc && fc.features) || [];
+    var url, params, isIdentify = false;
+    if (d.kind === 'feat' || (d.layers && d.layers.length)){
+      url = (d.kind === 'feat' ? d.url : d.url+'/'+d.layers[0]) + '/query';
+      params = {f:'json', where:'1=1', geometry:pt, geometryType:'esriGeometryPoint', inSR:4326, outSR:4326,
+                spatialRel:'esriSpatialRelIntersects', outFields:'*', returnGeometry:true, maxAllowableOffset:0.00005, geometryPrecision:6};
+    } else {
+      isIdentify = true;
+      var b = map.getBounds(), sz = map.getSize();
+      url = d.url + '/identify';
+      params = {f:'json', geometry:pt, geometryType:'esriGeometryPoint', sr:4326, layers:'all', tolerance:6,
+                mapExtent:[b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(','), imageDisplay:sz.x+','+sz.y+',96', returnGeometry:true};
+    }
+    arc(url, params, function(err, data){
+      if (run !== inspectRun) return;
+      pending--;
+      if (err){ fails.push(d.name+' ('+err.message+')'); return status(); }
+      var feats = (isIdentify ? data.results : data.features) || [];
+      if (!feats.length){ empty.push(d.name); return status(); }
       feats.slice(0,4).forEach(function(f){
-        if (f.geometry && /Polygon|Line/.test(f.geometry.type)){ try{ hi.addData(f); }catch(e){} }
-        cards.push('<div class="card"><h4>'+esc(d.name)+'</h4>'+propsHtml(f.properties)+'</div>');
+        hits++; drawGeom(f.geometry);
+        $('infoHits').insertAdjacentHTML('beforeend', '<div class="card"><h4>'+esc(d.name)+(f.layerName?' — '+esc(f.layerName):'')+'</h4>'+propsHtml(f.attributes, data.fieldAliases)+'</div>');
       });
-      done();
-    };
-    try{
-      if (d.kind === 'dyn'){
-        var q = live[d.id].identify().on(map).at(ll).tolerance(4);
-        if (d.layers && d.layers.length) q.layers('all:'+d.layers.join(','));
-        q.run(cb);
-      } else {
-        live[d.id].query().intersects(ll).run(cb);
-      }
-    }catch(e){ fails.push(d.name); done(); }
+      status();
+    });
   });
 }
 map.on('click', function(e){ inspect(e.latlng, 'Land at tapped spot'); });
