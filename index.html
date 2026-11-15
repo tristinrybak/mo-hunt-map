@@ -29,6 +29,8 @@
   .chip{pointer-events:auto; max-width:100%; background:rgba(20,25,15,.88); border:1px solid var(--line); border-radius:999px;
     padding:7px 12px; font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .chip b{font-weight:600}
+  select.chip{color:var(--ink); font:600 13px inherit; -webkit-appearance:none; appearance:none; padding-right:26px; border-color:var(--blaze);
+    background:rgba(20,25,15,.88) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23ff7a1a'/%3E%3C/svg%3E") no-repeat right 10px center}
   .dot{display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--dim); margin-right:6px; vertical-align:middle}
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
 
@@ -92,6 +94,7 @@
 <div id="status">
   <div class="chip" id="gpsChip"><span class="dot" id="gpsDot"></span><span id="gpsTxt">GPS off — tap Locate</span></div>
   <div class="chip" id="pChip" style="display:none"><span class="dot" id="pDot"></span><span id="pTxt"></span></div>
+  <select class="chip" id="goSel" aria-label="Go to a place"></select>
 </div>
 
 <div id="bar">
@@ -497,6 +500,71 @@ $('markSave').addEventListener('click', function(){
   wps.push({id:Date.now(), name:$('markName').value.trim()||('Waypoint '+(wps.length+1)), lat:markAt.lat, lng:markAt.lng});
   store.set('wps', wps); drawWps(); closeSheets(); toast('Waypoint saved.');
 });
+
+/* ---------- go to a place ---------- */
+// Deer method rules are from MDC's area pages for the 2026 season; they can change each year.
+var MDC0 = 'https://gisblue.mdc.mo.gov/arcgis/rest/services/Boundaries/MDC_Administrative_Boundaries/MapServer/0';
+var PLACES = [
+  {g:'Rifle allowed (deer, 2026)', n:'Meramec CA', q:'MERAMEC C%', ll:[38.209,-91.088], msg:'Rifle OK. No hunting inside the wildlife refuge part.'},
+  {g:'Rifle allowed (deer, 2026)', n:'Little Indian Creek CA', q:'LITTLE INDIAN CREEK C%', ll:[38.235,-90.915], msg:'Rifle OK.'},
+  {g:'Rifle allowed (deer, 2026)', n:'Long Ridge CA', q:'LONG RIDGE C%', ll:[38.298,-91.142], msg:'Rifle OK. Three No Shooting zones — see MDC area map.'},
+  {g:'No rifles (deer, 2026)', n:"River 'Round CA", q:'RIVER%ROUND C%', ll:[38.372,-90.905], msg:'Muzzleloader and archery only.'},
+  {g:'No rifles (deer, 2026)', n:'Catawissa CA', q:'CATAWISSA C%', ll:[38.433,-90.770], msg:'Muzzleloader and archery only.'},
+  {g:'No rifles (deer, 2026)', n:'Noser Mill CA', q:'NOSER MILL C%', ll:[38.386,-91.196], msg:'Archery only.'}
+];
+var mdcNameField = null, goRun = 0;
+function buildGo(){
+  var html = '<option value="">Go to…</option>', last = null;
+  PLACES.forEach(function(p, i){
+    if (p.g !== last){ if (last) html += '</optgroup>'; html += '<optgroup label="'+esc(p.g)+'">'; last = p.g; }
+    html += '<option value="p'+i+'">'+esc(p.n)+'</option>';
+  });
+  html += '</optgroup>';
+  if (wps.length) html += '<optgroup label="My waypoints">'+wps.map(function(w){ return '<option value="w'+w.id+'">'+esc(w.name)+'</option>'; }).join('')+'</optgroup>';
+  if (lastFix) html += '<optgroup label="Me"><option value="me">My location</option></optgroup>';
+  $('goSel').innerHTML = html;
+}
+function refinePlace(p, run){
+  // Try to frame the real boundary from MDC's data; the starting point above is approximate.
+  function q(field){
+    arc(MDC0+'/query', {f:'json', where:"UPPER("+field+") LIKE '"+p.q+"'", outFields:field, returnGeometry:true, outSR:4326, maxAllowableOffset:0.0002, geometryPrecision:5}, function(err, data){
+      if (err || run !== goRun || !data.features || !data.features.length) return;
+      var pts = [];
+      data.features.forEach(function(f){ ((f.geometry && f.geometry.rings) || []).forEach(function(r){ r.forEach(function(c){ pts.push([c[1], c[0]]); }); }); });
+      if (!pts.length) return;
+      var b = L.latLngBounds(pts);
+      if (b.getCenter().distanceTo(p.ll) > 25000) return;   // wrong match — keep the approximate spot
+      map.fitBounds(b, {padding:[30,30], maxZoom:15});
+    });
+  }
+  if (mdcNameField) return q(mdcNameField);
+  arc(MDC0, {f:'json'}, function(err, info){
+    if (err || !info.fields) return;
+    var names = info.fields.filter(function(f){ return f.type === 'esriFieldTypeString'; }).map(function(f){ return f.name; });
+    mdcNameField = names.filter(function(n){ return /area_?name/i.test(n); })[0] || names.filter(function(n){ return /name/i.test(n); })[0] || null;
+    if (mdcNameField && run === goRun) q(mdcNameField);
+  });
+}
+$('goSel').addEventListener('focus', buildGo);
+$('goSel').addEventListener('mousedown', buildGo);
+$('goSel').addEventListener('touchstart', buildGo, {passive:true});
+$('goSel').addEventListener('change', function(){
+  var v = this.value; this.value = '';
+  if (!v) return;
+  var run = ++goRun;
+  follow = false; $('bLocate').classList.remove('on'); closeSheets();
+  if (v === 'me'){ if (lastFix){ follow = true; $('bLocate').classList.add('on'); map.setView(lastFix.ll, Math.max(map.getZoom(), 16)); } return; }
+  if (v.charAt(0) === 'w'){
+    var w = wps.filter(function(x){ return 'w'+x.id === v; })[0];
+    if (w) map.setView([w.lat, w.lng], 16);
+    return;
+  }
+  var p = PLACES[parseInt(v.slice(1), 10)]; if (!p) return;
+  map.setView(p.ll, 14);
+  toast(p.n+' — '+p.msg+' Confirm with MDC before hunting.', 6000);
+  refinePlace(p, run);
+});
+buildGo();
 
 /* ---------- start ---------- */
 setBase(baseKey);
