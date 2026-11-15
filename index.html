@@ -25,8 +25,8 @@
 
   /* top status chip */
   #status{position:absolute; top:calc(var(--sat) + 10px); left:10px; right:10px; z-index:1000;
-    display:flex; gap:8px; align-items:center; pointer-events:none}
-  .chip{pointer-events:auto; background:rgba(20,25,15,.88); border:1px solid var(--line); border-radius:999px;
+    display:flex; flex-direction:column; gap:6px; align-items:flex-start; pointer-events:none}
+  .chip{pointer-events:auto; max-width:100%; background:rgba(20,25,15,.88); border:1px solid var(--line); border-radius:999px;
     padding:7px 12px; font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .chip b{font-weight:600}
   .dot{display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--dim); margin-right:6px; vertical-align:middle}
@@ -81,6 +81,8 @@
   #intro p{color:var(--dim); margin:8px 0}
   #intro strong{color:var(--ink)}
   .me{width:18px; height:18px; border-radius:50%; background:#2f8cff; border:3px solid #fff; box-shadow:0 0 0 2px rgba(0,0,0,.4)}
+  .leaflet-tooltip.own{background:none; border:0; box-shadow:none; color:#fff; font-size:10px; font-weight:600; text-shadow:0 0 3px #000, 0 0 3px #000; padding:0; white-space:normal; width:90px; text-align:center}
+  .leaflet-tooltip.own:before{display:none}
   .wp{width:26px; height:26px; border-radius:50% 50% 50% 0; background:var(--blaze); border:2px solid #fff; transform:rotate(-45deg); box-shadow:0 1px 4px rgba(0,0,0,.6)}
 </style>
 </head>
@@ -89,6 +91,7 @@
 
 <div id="status">
   <div class="chip" id="gpsChip"><span class="dot" id="gpsDot"></span><span id="gpsTxt">GPS off — tap Locate</span></div>
+  <div class="chip" id="pChip" style="display:none"><span class="dot" id="pDot"></span><span id="pTxt"></span></div>
 </div>
 
 <div id="bar">
@@ -163,7 +166,7 @@ if (!window.L || !L.esri){
 }
 
 /* ---------- map ---------- */
-var view = store.get('view', {c:[38.35,-92.45], z:7});
+var view = store.get('view', {c:[38.41,-91.07], z:11});
 var map = L.map('map', {zoomControl:false, center:view.c, zoom:view.z, maxZoom:20, tap:false});
 map.attributionControl.setPrefix('');
 L.control.scale({imperial:true, metric:false, position:'topright'}).addTo(map);
@@ -201,8 +204,10 @@ var builtin = [
    url:'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_BasicOwnership_02/MapServer', layers:[0], on:true},
   {id:'padus', name:'Other public land', sub:'USGS PAD-US: Corps of Engineers (Mark Twain Lake), refuges, state parks', color:'#c58bff', kind:'feat',
    url:'https://services.arcgis.com/v01gqwM5QqNysAAi/arcgis/rest/services/Fee_Manager/FeatureServer/0', minZoom:10, on:true},
-  {id:'franklin', name:'Franklin County parcels', sub:'Franklin County, MO — private property lines and owners; zoom in close', color:'#ff7a1a', kind:'dyn', custom:false, parcel:true,
-   url:'https://www.franklinmo.net/server/rest/services/MapLayers/Parcel_Data_New/MapServer', layers:[0], on:true, opacity:.9},
+  {id:'franklin', name:'Franklin County parcels', sub:'Franklin County, MO — private property lines and owners; shows at close zoom', color:'#ff7a1a', kind:'vec', parcel:true, minZoom:14, on:true,
+   url:'https://www.franklinmo.net/server/rest/services/MapLayers/Parcel_Data_New/MapServer/0',
+   urls:['https://www.franklinmo.net/server/rest/services/MapLayers/Parcel_Data_New/MapServer/0',
+         'https://www.franklinmo.net/server/rest/services/MapLayers/NewLand/MapServer/15']},
   {id:'plss', name:'Section lines (PLSS)', sub:'MSDIS — township/range/section grid; rural property lines often follow these', color:'#ffffff', kind:'dyn',
    url:'https://msdisweb.missouri.edu/arcgis/rest/services/Administrative_Boundaries/MO_Public_Land_Survey_System/MapServer', layers:[0], on:false, opacity:.75}
 ];
@@ -215,8 +220,45 @@ function allDefs(){ return builtin.concat(custom.map(function(c){
 })); }
 function isOn(d){ return (d.id in onState) ? onState[d.id] : !!d.on; }
 
+// Parcel lines drawn on the phone: asks the county server for the parcels in view.
+function setPStat(txt, cls){ var c=$('pChip'); c.style.display = txt ? '' : 'none'; $('pDot').className='dot '+(cls||''); $('pTxt').textContent = txt||''; }
+function makeVec(d){
+  var g = L.featureGroup(), seq = 0, idx = 0, timer = null;
+  function load(){
+    if (!map.hasLayer(g)) return;
+    var z = map.getZoom(), my = ++seq;
+    if (z < d.minZoom){ g.clearLayers(); setPStat('Parcel lines: zoom in closer', 'warn'); return; }
+    var b = map.getBounds().pad(0.1);
+    setPStat('Parcel lines: loading…', 'warn');
+    arc(d.urls[idx]+'/query', {f:'json', where:'1=1', geometry:[b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(','),
+        geometryType:'esriGeometryEnvelope', inSR:4326, outSR:4326, spatialRel:'esriSpatialRelIntersects', outFields:'*',
+        returnGeometry:true, maxAllowableOffset:0.00002, geometryPrecision:6}, function(err, data){
+      if (my !== seq) return;
+      if (err){
+        if (idx < d.urls.length-1){ idx++; d.url = d.urls[idx]; seq--; return load(); }
+        setPStat('Parcel lines: county server not answering ('+err.message+')', 'bad'); return;
+      }
+      var feats = data.features || [];
+      g.clearLayers();
+      var ownKey = null;
+      if (feats[0] && feats[0].attributes){ Object.keys(feats[0].attributes).some(function(k){ if(/owner|own_?name/i.test(k)){ ownKey=k; return true; } return false; }); }
+      feats.forEach(function(f){
+        if (!f.geometry || !f.geometry.rings) return;
+        var p = L.polygon(f.geometry.rings.map(function(r){ return r.map(function(q){ return [q[1], q[0]]; }); }),
+          {color:d.color, weight:2, opacity:.95, fill:false, pane:'parcel', interactive:false}).addTo(g);
+        if (ownKey && z >= 16 && f.attributes[ownKey]) p.bindTooltip(String(f.attributes[ownKey]).slice(0,40), {permanent:true, direction:'center', className:'own'});
+      });
+      setPStat('Parcel lines: '+feats.length+' shown'+(data.exceededTransferLimit ? ' — zoom in for all' : ''), feats.length ? 'ok' : 'warn');
+    });
+  }
+  function sched(){ clearTimeout(timer); timer = setTimeout(load, 350); }
+  g.on('add', function(){ map.on('moveend', sched); load(); });
+  g.on('remove', function(){ map.off('moveend', sched); seq++; setPStat(''); });
+  return g;
+}
 function makeLayer(d){
   var lyr;
+  if (d.kind === 'vec') return makeVec(d);
   if (d.kind === 'dyn'){
     var o = {url:d.url, f:'image', format:'png32', transparent:true, opacity:d.opacity||0.85, pane:(d.custom||d.parcel)?'parcel':'ov'};
     if (d.layers && d.layers.length) o.layers = d.layers;
@@ -232,7 +274,7 @@ function makeLayer(d){
 }
 function setOverlay(d, on){
   onState[d.id] = on; store.set('on', onState);
-  if (on && !live[d.id]){ live[d.id] = makeLayer(d).addTo(map); if (d.minZoom && map.getZoom() < d.minZoom) toast('Zoom in to see "'+d.name+'".'); }
+  if (on && !live[d.id]){ live[d.id] = makeLayer(d).addTo(map); if (d.kind !== 'vec' && d.minZoom && map.getZoom() < d.minZoom) toast('Zoom in to see "'+d.name+'".'); }
   if (!on && live[d.id]){ map.removeLayer(live[d.id]); delete live[d.id]; }
 }
 
@@ -387,8 +429,8 @@ function inspect(ll, title){
   var pt = ll.lng+','+ll.lat;
   defs.forEach(function(d){
     var url, params, isIdentify = false;
-    if (d.kind === 'feat' || (d.layers && d.layers.length)){
-      url = (d.kind === 'feat' ? d.url : d.url+'/'+d.layers[0]) + '/query';
+    if (d.kind === 'feat' || d.kind === 'vec' || (d.layers && d.layers.length)){
+      url = (d.kind !== 'dyn' ? d.url : d.url+'/'+d.layers[0]) + '/query';
       params = {f:'json', where:'1=1', geometry:pt, geometryType:'esriGeometryPoint', inSR:4326, outSR:4326,
                 spatialRel:'esriSpatialRelIntersects', outFields:'*', returnGeometry:true, maxAllowableOffset:0.00005, geometryPrecision:6};
     } else {
